@@ -1,0 +1,191 @@
+# app.py
+import streamlit as st
+import pandas as pd
+import database as db
+from datetime import datetime
+
+st.set_page_config(layout="wide")
+st.title("Startup Performance Management System")
+
+# --- User Selection / "Login" ---
+st.sidebar.title("Login")
+users = db.get_users()
+if users.empty:
+    st.error("No users found in the database. Please run the setup script.")
+    st.stop()
+
+user_id = st.sidebar.selectbox("Select Your User Account", options=users['user_id'], format_func=lambda x: users.loc[users['user_id'] == x, 'name'].iloc[0])
+user_info = users[users['user_id'] == user_id].iloc[0]
+user_name = user_info['name']
+user_role = user_info['role']
+
+st.sidebar.header(f"Welcome, {user_name}")
+st.sidebar.write(f"Your Role: **{user_role}**")
+
+# =================================================================================================
+# --- MANAGER VIEW ---
+# =================================================================================================
+if user_role == 'Manager':
+    st.header(f"Manager Dashboard: {user_name}")
+    
+    # Get employees for this manager
+    my_employees = db.get_employees_for_manager(user_id)
+    if my_employees.empty:
+        st.info("You do not have any employees assigned to you.")
+        st.stop()
+
+    selected_employee_id = st.selectbox("Select an Employee to Manage", options=my_employees['user_id'], format_func=lambda x: my_employees.loc[my_employees['user_id'] == x, 'name'].iloc[0])
+    selected_employee_name = my_employees[my_employees['user_id'] == selected_employee_id]['name'].iloc[0]
+
+    tab1, tab2, tab3 = st.tabs(["🎯 Goals & Tasks", "✍️ Feedback", "📊 Performance Report"])
+
+    with tab1:
+        st.subheader(f"Goals & Tasks for {selected_employee_name}")
+        
+        # --- Create New Goal ---
+        with st.expander("Set a New Goal"):
+            with st.form("new_goal_form"):
+                goal_desc = st.text_area("Goal Description")
+                goal_due = st.date_input("Due Date", min_value=datetime.now())
+                submit_goal = st.form_submit_button("Create Goal")
+                if submit_goal and goal_desc:
+                    if db.create_goal(selected_employee_id, user_id, goal_desc, goal_due):
+                        st.success("New goal created successfully!")
+                        st.experimental_rerun()
+                    else:
+                        st.error("Failed to create goal.")
+
+        # --- View and Manage Existing Goals ---
+        employee_goals = db.get_goals(selected_employee_id, 'Employee')
+        if employee_goals.empty:
+            st.write("This employee has no goals assigned.")
+        else:
+            for index, goal in employee_goals.iterrows():
+                st.markdown("---")
+                col1, col2, col3 = st.columns([2,1,1])
+                with col1:
+                    st.write(f"**Goal:** {goal['description']}")
+                with col2:
+                    st.write(f"**Due:** {goal['due_date']}")
+                with col3:
+                    new_status = st.selectbox(
+                        "Update Status", 
+                        options=['Draft', 'In Progress', 'Completed', 'Cancelled'], 
+                        index=['Draft', 'In Progress', 'Completed', 'Cancelled'].index(goal['status']),
+                        key=f"status_{goal['goal_id']}"
+                    )
+                    if new_status != goal['status']:
+                        if db.update_goal_status(goal['goal_id'], new_status):
+                            st.success(f"Status updated to {new_status}")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Failed to update status.")
+                
+                # --- View and Approve Tasks for Goal ---
+                st.write("**Tasks for this goal:**")
+                tasks = db.get_tasks_for_goal(goal['goal_id'])
+                if tasks.empty:
+                    st.write("*No tasks logged by employee yet.*")
+                else:
+                    for _, task in tasks.iterrows():
+                        task_col1, task_col2 = st.columns([3,1])
+                        task_col1.write(f"- {task['description']} (Status: *{task['status']}*)")
+                        if task['status'] == 'Pending Approval':
+                            if task_col2.button("Approve Task", key=f"approve_{task['task_id']}"):
+                                db.update_task_status(task['task_id'], 'Approved')
+                                st.experimental_rerun()
+
+    with tab2:
+        st.subheader(f"Provide Feedback for {selected_employee_name}")
+        
+        goals_for_feedback = employee_goals.copy()
+        goals_for_feedback['display'] = goals_for_feedback['description'].apply(lambda x: x[:50] + '...')
+        
+        if not goals_for_feedback.empty:
+            selected_goal_id = st.selectbox("Select a Goal to give feedback on:", options=goals_for_feedback['goal_id'], format_func=lambda x: goals_for_feedback.loc[goals_for_feedback['goal_id'] == x, 'display'].iloc[0])
+            
+            with st.form("feedback_form"):
+                feedback_text = st.text_area("Your Feedback")
+                submit_feedback = st.form_submit_button("Submit Feedback")
+
+                if submit_feedback and feedback_text:
+                    if db.create_feedback(selected_goal_id, user_id, selected_employee_id, feedback_text):
+                        st.success("Feedback submitted!")
+                    else:
+                        st.error("Failed to submit feedback.")
+        else:
+            st.info("Cannot provide feedback as there are no goals for this employee.")
+            
+    with tab3:
+        st.subheader(f"Performance Report for {selected_employee_name}")
+        # --- Analytics Dashboard ---
+        st.markdown("#### Goal Status Overview")
+        if not employee_goals.empty:
+            status_counts = employee_goals['status'].value_counts()
+            st.bar_chart(status_counts)
+        else:
+            st.write("No goal data to display.")
+
+        st.markdown("#### Feedback History")
+        feedback_history = db.get_feedback_for_employee(selected_employee_id)
+        if not feedback_history.empty:
+            for _, feedback in feedback_history.iterrows():
+                st.info(f"""
+                **Goal:** {feedback['goal_description']}  
+                **Feedback:** {feedback['feedback_text']}  
+                **Date:** {feedback['created_at'].strftime('%Y-%m-%d %H:%M')}
+                {'**(Automated)**' if feedback['is_automated'] else ''}
+                """)
+        else:
+            st.write("No feedback history found.")
+
+
+# =================================================================================================
+# --- EMPLOYEE VIEW ---
+# =================================================================================================
+elif user_role == 'Employee':
+    st.header(f"Employee Dashboard: {user_name}")
+    
+    tab1, tab2 = st.tabs(["🎯 My Goals & Tasks", "📜 My Feedback"])
+    
+    my_goals = db.get_goals(user_id, 'Employee')
+
+    with tab1:
+        st.subheader("My Assigned Goals")
+        if my_goals.empty:
+            st.info("You have no goals assigned. Please contact your manager.")
+        else:
+            for index, goal in my_goals.iterrows():
+                with st.expander(f"Goal: {goal['description']} (Due: {goal['due_date']}) - Status: {goal['status']}"):
+                    st.write("**Tasks to achieve this goal:**")
+                    tasks = db.get_tasks_for_goal(goal['goal_id'])
+                    if not tasks.empty:
+                        for _, task in tasks.iterrows():
+                            st.markdown(f"- {task['description']} *(Status: {task['status']})*")
+                    else:
+                        st.write("*You haven't added any tasks for this goal yet.*")
+                    
+                    # Add new task
+                    st.markdown("---")
+                    new_task_desc = st.text_input("Log a new task:", key=f"new_task_{goal['goal_id']}")
+                    if st.button("Add Task", key=f"add_task_{goal['goal_id']}"):
+                        if new_task_desc:
+                            db.create_task(goal['goal_id'], new_task_desc)
+                            st.success("Task added and is pending manager approval.")
+                            st.experimental_rerun()
+                        else:
+                            st.warning("Task description cannot be empty.")
+    
+    with tab2:
+        st.subheader("My Performance Feedback")
+        feedback_history = db.get_feedback_for_employee(user_id)
+        if not feedback_history.empty:
+            for _, feedback in feedback_history.iterrows():
+                st.info(f"""
+                **On Goal:** {feedback['goal_description']}  
+                **Feedback:** {feedback['feedback_text']}  
+                **Received on:** {feedback['created_at'].strftime('%Y-%m-%d %H:%M')}
+                {'**(System Message)**' if feedback['is_automated'] else ''}
+                """)
+        else:
+            st.write("No feedback history found.")
