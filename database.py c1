@@ -1,0 +1,127 @@
+# database.py
+import psycopg2
+import pandas as pd
+from contextlib import contextmanager
+
+# Use the database details provided by the user
+DB_DETAILS = {
+    "host": "localhost",
+    "database": "PMS",  # New database name
+    "user": "postgres",
+    "password": "Jithu@2002" # Replace with your password
+}
+
+@contextmanager
+def get_db_connection():
+    """Provides a connection to the PostgreSQL database."""
+    conn = None
+    try:
+        conn = psycopg2.connect(**DB_DETAILS)
+        yield conn
+    except psycopg2.OperationalError as e:
+        print(f"Database connection error: {e}")
+        yield None
+    finally:
+        if conn:
+            conn.close()
+
+def execute_query(query, params=None, fetch=None):
+    """A generic function to execute queries."""
+    with get_db_connection() as conn:
+        if not conn:
+            return None if fetch else False
+        with conn.cursor() as cur:
+            try:
+                cur.execute(query, params)
+                if fetch == "one":
+                    return cur.fetchone()
+                if fetch == "all":
+                    return cur.fetchall()
+                conn.commit()
+                return True
+            except psycopg2.Error as e:
+                print(f"Database Error: {e}")
+                conn.rollback()
+                return None if fetch else False
+
+def fetch_data_as_df(query, params=None):
+    """Fetches data from the database into a pandas DataFrame."""
+    with get_db_connection() as conn:
+        if conn:
+            try:
+                return pd.read_sql(query, conn, params=params)
+            except pd.io.sql.DatabaseError as e:
+                print(f"SQL query error: {e}")
+    return pd.DataFrame()
+
+# --- User Management ---
+def get_users(role=None):
+    """Fetches users, optionally filtered by role."""
+    query = "SELECT user_id, name, role FROM users ORDER BY name"
+    if role:
+        query = f"SELECT user_id, name, role FROM users WHERE role = '{role}' ORDER BY name"
+    return fetch_data_as_df(query)
+
+def get_employees_for_manager(manager_id):
+    """Fetches employees reporting to a specific manager."""
+    query = "SELECT user_id, name FROM users WHERE manager_id = %s ORDER BY name"
+    return fetch_data_as_df(query, (manager_id,))
+
+
+# --- Goal Management ---
+def create_goal(assigned_to, assigned_by, description, due_date):
+    """Inserts a new goal."""
+    query = """
+    INSERT INTO goals (assigned_to, assigned_by, description, due_date, status)
+    VALUES (%s, %s, %s, %s, 'Draft');
+    """
+    return execute_query(query, (assigned_to, assigned_by, description, due_date))
+
+def get_goals(user_id, user_role):
+    """Fetches goals for a given user."""
+    if user_role == 'Manager':
+        query = "SELECT * FROM goals WHERE assigned_by = %s ORDER BY due_date DESC"
+    else:
+        query = "SELECT * FROM goals WHERE assigned_to = %s ORDER BY due_date DESC"
+    return fetch_data_as_df(query, (user_id,))
+
+def update_goal_status(goal_id, status):
+    """Updates the status of a goal."""
+    query = "UPDATE goals SET status = %s WHERE goal_id = %s"
+    return execute_query(query, (status, goal_id))
+
+# --- Task Management ---
+def create_task(goal_id, description):
+    """Inserts a new task for a goal."""
+    query = "INSERT INTO tasks (goal_id, description, status) VALUES (%s, %s, 'Pending Approval')"
+    return execute_query(query, (goal_id, description))
+
+def get_tasks_for_goal(goal_id):
+    """Fetches all tasks for a specific goal."""
+    query = "SELECT * FROM tasks WHERE goal_id = %s ORDER BY task_id"
+    return fetch_data_as_df(query, (goal_id,))
+
+def update_task_status(task_id, status):
+    """Updates the status of a task."""
+    query = "UPDATE tasks SET status = %s WHERE task_id = %s"
+    return execute_query(query, (status, task_id))
+
+# --- Feedback Management ---
+def create_feedback(goal_id, manager_id, employee_id, feedback_text):
+    """Inserts new feedback."""
+    query = """
+    INSERT INTO feedback (goal_id, manager_id, employee_id, feedback_text, is_automated)
+    VALUES (%s, %s, %s, %s, FALSE);
+    """
+    return execute_query(query, (goal_id, manager_id, employee_id, feedback_text))
+
+def get_feedback_for_employee(employee_id):
+    """Fetches all feedback for a specific employee."""
+    query = """
+    SELECT f.feedback_text, f.created_at, f.is_automated, g.description as goal_description
+    FROM feedback f
+    JOIN goals g ON f.goal_id = g.goal_id
+    WHERE f.employee_id = %s
+    ORDER BY f.created_at DESC;
+    """
+    return fetch_data_as_df(query, (employee_id,))
